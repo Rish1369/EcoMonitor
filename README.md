@@ -21,10 +21,11 @@
    ```bash
    docker run -d --name eco-redis -p 6379:6379 redis:7
    ```
-6. Start the server (Terminal 1):
+6. Start the server (Terminal 1) using ASGI:
    ```bash
-   python manage.py runserver
+   uvicorn config.asgi:application --reload --port 8000
    ```
+   *Note: Local development now runs via uvicorn instead of `python manage.py runserver`. This is because we are using `async def` views for high-concurrency polling endpoints. The traditional `runserver` runs under WSGI and forces all async views into a synchronous thread pool, which completely defeats the performance benefits of asynchronous I/O. Using an ASGI server like Uvicorn allows our async views to run natively in the event loop, maximizing throughput while our sync API views automatically run safely in a thread pool.*
 7. Start the Celery worker (Terminal 2):
    ```bash
    celery -A config worker -l info
