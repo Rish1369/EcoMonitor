@@ -112,3 +112,35 @@ router.register(r'', TaskViewSet, basename='task')
   2. It mathematically verifies the cryptographic signature of the token and checks expiration.
   3. It extracts the `user_id` from the token, finds the user in the database, and attaches them to `request.user`.
   4. Finally, the view's **`IsAuthenticated`** permission class simply checks if `request.user` successfully exists.
+
+---
+
+## 7. Celery & Background Processing
+
+### The Initialization Hook (`config/__init__.py`)
+```python
+from .celery import app as celery_app
+__all__ = ('celery_app',)
+```
+* **Concept:** Forcing App Initialization.
+* **Explanation:** When Django starts, it imports the `config` module, triggering this `__init__.py` file immediately. Importing `celery_app` forces Python to evaluate `config/celery.py`, officially turning on the Celery application in memory. This is mandatory so decorators like `@shared_task` (which are imported generically from the celery library) can find an active Celery instance to bind to.
+* **The `__all__` variable:** This explicitly defines the public API of the module. It strictly tells Python: "If a developer does `from config import *`, ONLY export `celery_app`." It prevents accidentally leaking or exposing other internal variables.
+
+### The Custom `@action` Decorator (`tasks/views.py`)
+```python
+@action(detail=True, methods=['post'])
+def run(self, request, pk=None):
+```
+* **Concept:** Custom ViewSet Endpoints.
+* **Explanation:** While `ModelViewSet` automatically generates standard CRUD routes, decorators like `@action` allow you to bolt on custom operations (like "Run Task").
+* **`detail=True`:** Tells the DRF Router this action applies to a single database row, forcing it to generate a URL that requires an ID (e.g., `/api/tasks/<pk>/run/`).
+* **Retrieving the Task (`self.get_object()`):** Because `detail=True` forces an ID in the URL, DRF automatically extracts that ID and makes it available. Calling `self.get_object()` automatically queries the database using that ID, verifies the user owns it (using our `get_queryset` rules), and returns the specific `Task` object.
+
+### Dispatching Tasks Safely
+```python
+transaction.on_commit(lambda: process_task.delay(str(task.id)))
+```
+* **Concept:** Async Dispatch & Database Transactions.
+* **Explanation:** 
+  1. **`.delay()`:** Instead of freezing the Django server to run `process_task` instantly, `.delay()` converts the function call into a message and fires it into the Redis queue for a background worker to pick up.
+  2. **`transaction.on_commit()`:** Ensures the message is ONLY sent to Redis *after* the current Django database transaction successfully commits. Without this, an ultra-fast Celery worker might pick up the task from Redis before Django finishes saving it to the database, causing the worker to crash with a "Task not found" error.

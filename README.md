@@ -17,9 +17,17 @@
    python manage.py makemigrations
    python manage.py migrate
    ```
-5. Start the server:
+5. Start Redis (requires Docker):
+   ```bash
+   docker run -d --name eco-redis -p 6379:6379 redis:7
+   ```
+6. Start the server (Terminal 1):
    ```bash
    python manage.py runserver
+   ```
+7. Start the Celery worker (Terminal 2):
+   ```bash
+   celery -A config worker -l info
    ```
 
 ## API Testing with Curl
