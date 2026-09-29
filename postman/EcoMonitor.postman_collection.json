@@ -1,0 +1,289 @@
+{
+    "info": {
+        "_postman_id": "ecomonitor-collection-v1",
+        "name": "EcoMonitor API",
+        "description": "Full lifecycle collection for the EcoMonitor Django/Celery API.\n\n**How to use**\n1. Import this collection AND `EcoMonitor.local.postman_environment.json`.\n2. Select the *EcoMonitor – Local* environment from the top-right dropdown.\n3. Run folder **1 - Auth** once (Register then Login) — the Login Tests script auto-saves `access_token` and `refresh_token`.\n4. Use the **Collection Runner** on folder **2 - Task Lifecycle** with *5 iterations* to fire 5 jobs in sequence.\n   - Each iteration creates one task, triggers the Celery worker, then polls until COMPLETED.\n   - The Poll Status request re-queues itself (up to 15 times per task) when status is not yet COMPLETED.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "auth": {
+        "type": "bearer",
+        "bearer": [
+            {
+                "key": "token",
+                "value": "{{access_token}}",
+                "type": "string"
+            }
+        ]
+    },
+    "item": [
+        {
+            "name": "1 - Auth",
+            "description": "Authentication requests. Run these once before anything else.\n\nOrder:\n1. Register — creates a new user account.\n2. Login — exchanges credentials for JWT tokens; the Tests script saves them into the environment automatically.",
+            "item": [
+                {
+                    "name": "Register",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/auth/register/",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "auth", "register", ""]
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"username\": \"{{username}}\",\n    \"password\": \"{{password}}\",\n    \"email\": \"testuser@example.com\",\n    \"organization\": \"Acme Corp\",\n    \"phone\": \"555-1234\"\n}"
+                        },
+                        "description": "**What it does**: Creates a new user account.\n\n**Expected response**: `201 Created` with the new user's details.\n\n**If you get 400**: The username is already taken. Either change `username` in the environment or log straight in with Login."
+                    },
+                    "response": []
+                },
+                {
+                    "name": "Login",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// Verify we got a 200 OK.",
+                                    "pm.test('Login returns 200', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "});",
+                                    "",
+                                    "// Parse the response body.",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "// Assert both tokens are present.",
+                                    "pm.test('Response contains access token', function () {",
+                                    "    pm.expect(body).to.have.property('access');",
+                                    "});",
+                                    "pm.test('Response contains refresh token', function () {",
+                                    "    pm.expect(body).to.have.property('refresh');",
+                                    "});",
+                                    "",
+                                    "// Save tokens into the active environment so all subsequent",
+                                    "// requests inherit Bearer {{access_token}} automatically.",
+                                    "pm.environment.set('access_token', body.access);",
+                                    "pm.environment.set('refresh_token', body.refresh);",
+                                    "",
+                                    "console.log('Tokens saved to environment.');"
+                                ]
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/auth/token/",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "auth", "token", ""]
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"username\": \"{{username}}\",\n    \"password\": \"{{password}}\"\n}"
+                        },
+                        "description": "**What it does**: Exchanges `username` + `password` for a JWT access/refresh token pair.\n\n**Expected response**: `200 OK` with `{ \"access\": \"...\", \"refresh\": \"...\" }`.\n\n**Tests script**: Automatically saves both tokens into the environment variables `access_token` and `refresh_token`. Every other request in this collection uses `Bearer {{access_token}}` via the collection-level auth setting, so you do not need to copy-paste tokens manually."
+                    },
+                    "response": []
+                }
+            ]
+        },
+        {
+            "name": "2 - Task Lifecycle",
+            "description": "Run this folder via the **Collection Runner** with *5 iterations* to fire 5 complete task lifecycles.\n\n**Order within each iteration**:\n1. Create Task → starts a new PENDING task and saves its `id` as `current_task_id`.\n2. Run Task → tells Celery to process it; expects `202 Accepted`.\n3. Poll Status → polls the async status endpoint, re-queuing itself (up to 15 times) until the task reaches COMPLETED.\n\n> ⚠️ **Polling re-run only works in Collection Runner.**  \n> Clicking *Send* once in the request editor will NOT re-run the request automatically — `postman.setNextRequest` is a Collection Runner feature.",
+            "item": [
+                {
+                    "name": "Create Task",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Create Task returns 201', function () {",
+                                    "    pm.response.to.have.status(201);",
+                                    "});",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('Response contains task id', function () {",
+                                    "    pm.expect(body).to.have.property('id');",
+                                    "});",
+                                    "",
+                                    "pm.test('Task is PENDING by default', function () {",
+                                    "    pm.expect(body.status).to.eql('PENDING');",
+                                    "});",
+                                    "",
+                                    "// Save the new task's id so the next two requests can reference it.",
+                                    "pm.environment.set('current_task_id', body.id);",
+                                    "",
+                                    "// Reset the poll counter for this iteration.",
+                                    "pm.environment.set('poll_count', '0');",
+                                    "",
+                                    "console.log('Created task:', body.id);"
+                                ]
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/api/tasks/",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "tasks", ""]
+                        },
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"title\": \"Postman Runner Report\",\n    \"task_type\": \"REPORT_PDF\"\n}"
+                        },
+                        "description": "**What it does**: Creates a new Task in PENDING state.\n\n**Expected response**: `201 Created` with `{ \"id\": \"<uuid>\", \"status\": \"PENDING\", ... }`.\n\n**Tests script**: Saves the returned `id` into `current_task_id` and resets `poll_count` to 0 so the polling request starts fresh for this task."
+                    },
+                    "response": []
+                },
+                {
+                    "name": "Run Task",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// The /run/ endpoint queues the Celery job and immediately returns 202.",
+                                    "// A 409 here means the task is not PENDING (e.g. already PROCESSING).",
+                                    "pm.test('Run Task returns 202 Accepted', function () {",
+                                    "    pm.response.to.have.status(202);",
+                                    "});",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "pm.test('Response status is QUEUED', function () {",
+                                    "    pm.expect(body.status).to.eql('QUEUED');",
+                                    "});",
+                                    "",
+                                    "console.log('Task queued:', pm.environment.get('current_task_id'));"
+                                ]
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/tasks/{{current_task_id}}/run/",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "tasks", "{{current_task_id}}", "run", ""]
+                        },
+                        "description": "**What it does**: Sends the task to the Celery queue for processing. The server returns immediately with `202 Accepted` — it does NOT wait for the task to finish.\n\n**Expected response**: `202 Accepted` with `{ \"id\": \"<uuid>\", \"status\": \"QUEUED\" }`.\n\n**Prerequisite**: The Celery worker must be running (`celery -A config worker -l info`) otherwise the task will stay PENDING indefinitely and polling will time out."
+                    },
+                    "response": []
+                },
+                {
+                    "name": "Poll Status",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// --------------------------------------------------------------------------",
+                                    "// Poll Status — self-repeating request",
+                                    "// --------------------------------------------------------------------------",
+                                    "// This request re-queues ITSELF (via postman.setNextRequest) while the",
+                                    "// task is still PROCESSING, up to a maximum of 15 attempts.",
+                                    "// It only works in the Collection Runner — clicking Send once in the",
+                                    "// editor fires the request once and stops.",
+                                    "// --------------------------------------------------------------------------",
+                                    "",
+                                    "pm.test('Poll Status returns 200', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "});",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('Response has count and results', function () {",
+                                    "    pm.expect(body).to.have.property('count');",
+                                    "    pm.expect(body).to.have.property('results');",
+                                    "    pm.expect(body.count).to.be.at.least(1);",
+                                    "});",
+                                    "",
+                                    "// The status endpoint can return multiple tasks; we care about ours.",
+                                    "const taskId   = pm.environment.get('current_task_id');",
+                                    "const taskData = body.results.find(r => r.id === taskId);",
+                                    "",
+                                    "pm.test('Our task is in the results', function () {",
+                                    "    pm.expect(taskData).to.not.be.undefined;",
+                                    "});",
+                                    "",
+                                    "const currentStatus = taskData ? taskData.status : 'UNKNOWN';",
+                                    "console.log(`Task ${taskId} status: ${currentStatus}`);",
+                                    "",
+                                    "if (currentStatus === 'COMPLETED') {",
+                                    "    // ✅ Task finished — assert success and clean up loop state.",
+                                    "    pm.test('Task reached COMPLETED', function () {",
+                                    "        pm.expect(currentStatus).to.eql('COMPLETED');",
+                                    "    });",
+                                    "    pm.environment.unset('poll_count');",
+                                    "    console.log('Task COMPLETED. Moving to next iteration.');",
+                                    "",
+                                    "} else {",
+                                    "    // Task is still PENDING or PROCESSING — keep polling.",
+                                    "    const pollCount = parseInt(pm.environment.get('poll_count') || '0', 10);",
+                                    "",
+                                    "    if (pollCount < 15) {",
+                                    "        pm.environment.set('poll_count', String(pollCount + 1));",
+                                    "        console.log(`Still ${currentStatus}. Poll attempt ${pollCount + 1}/15. Retrying…`);",
+                                    "        // Re-run THIS request in the Collection Runner.",
+                                    "        postman.setNextRequest(pm.info.requestName);",
+                                    "    } else {",
+                                    "        // 15 attempts exceeded — fail loudly.",
+                                    "        pm.test('Task completed within 15 polls', function () {",
+                                    "            pm.expect.fail(",
+                                    "                `Timeout: task ${taskId} still ${currentStatus} after 15 polls. ` +",
+                                    "                'Is the Celery worker running?'",
+                                    "            );",
+                                    "        });",
+                                    "    }",
+                                    "}"
+                                ]
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/tasks/status/?ids={{current_task_id}}",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "tasks", "status", ""],
+                            "query": [
+                                {
+                                    "key": "ids",
+                                    "value": "{{current_task_id}}"
+                                }
+                            ]
+                        },
+                        "description": "**What it does**: Calls the async Django view (`task_status`) to check the current status of `current_task_id`.\n\n**Expected response**: `200 OK` with `{ \"count\": 1, \"results\": [ { \"id\": \"...\", \"status\": \"COMPLETED\", ... } ] }`.\n\n**Tests script (Collection Runner only)**:\n- If status is `COMPLETED` → asserts success and moves to the next iteration.\n- If status is `PENDING` or `PROCESSING` and `poll_count < 15` → increments `poll_count` and calls `postman.setNextRequest(pm.info.requestName)` to re-run this same request automatically.\n- If `poll_count >= 15` → fails with a timeout message (Celery worker likely not running).\n\n> ⚠️ Self-repetition only works in the **Collection Runner**. Clicking Send once will fire the request once and stop regardless of status."
+                    },
+                    "response": []
+                }
+            ]
+        }
+    ]
+}

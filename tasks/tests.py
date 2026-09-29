@@ -139,3 +139,120 @@ class AsyncStatusViewTests(APITestCase):
         returned_ids = {r["id"] for r in data["results"]}
         expected_ids = {str(t.id) for t in self.tasksA}
         self.assertEqual(returned_ids, expected_ids)
+
+
+# ---------------------------------------------------------------------------
+# Beat / purge tests
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta
+from django.utils import timezone
+from unittest.mock import patch
+from .tasks import purge_old_completed_tasks
+
+
+class PurgeTaskTests(APITestCase):
+    """
+    Tests for purge_old_completed_tasks.
+
+    Design notes
+    ------------
+    • completed_at uses auto_now=False so we can back-date it directly via
+      .update(), which bypasses model validation and auto_now fields.
+    • We call the task function directly (no Celery worker needed) so tests
+      run fast and deterministically.
+    • The critical assertion is that AuditLog tombstones survive with
+      task=None but task_uuid intact — this proves forensic history is
+      preserved even after the Task row is gone.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="purge_user", password="pw")
+
+    def _make_completed_task(self, title, hours_ago):
+        """
+        Create a COMPLETED Task whose completed_at is backdated by
+        `hours_ago` hours.  We use .update() so auto_now doesn't
+        overwrite our backdated timestamp.
+        """
+        task = Task.objects.create(
+            owner=self.user,
+            title=title,
+            task_type=Task.TaskType.REPORT_PDF,
+            status=Task.Status.COMPLETED,
+        )
+        backdated = timezone.now() - timedelta(hours=hours_ago)
+        Task.objects.filter(pk=task.pk).update(completed_at=backdated)
+        task.refresh_from_db()
+        return task
+
+    def test_stale_task_is_deleted(self):
+        """A COMPLETED task whose completed_at is >24 h ago is purged."""
+        stale = self._make_completed_task("Stale Task", hours_ago=25)
+        result = purge_old_completed_tasks()
+        self.assertEqual(result, 1)
+        self.assertFalse(Task.objects.filter(pk=stale.pk).exists())
+
+    def test_fresh_task_survives(self):
+        """A COMPLETED task whose completed_at is <24 h ago is kept."""
+        fresh = self._make_completed_task("Fresh Task", hours_ago=1)
+        result = purge_old_completed_tasks()
+        self.assertEqual(result, 0)
+        self.assertTrue(Task.objects.filter(pk=fresh.pk).exists())
+
+    def test_stale_deleted_fresh_survives_together(self):
+        """
+        When both a stale and a fresh task exist, only the stale one
+        is deleted and only one tombstone is written.
+        """
+        stale = self._make_completed_task("Stale", hours_ago=25)
+        fresh = self._make_completed_task("Fresh", hours_ago=1)
+
+        result = purge_old_completed_tasks()
+
+        self.assertEqual(result, 1)
+        self.assertFalse(Task.objects.filter(pk=stale.pk).exists())
+        self.assertTrue(Task.objects.filter(pk=fresh.pk).exists())
+
+    def test_tombstone_auditlog_preserved_after_purge(self):
+        """
+        After purge, AuditLog rows for the deleted task must have:
+          - task       = None   (FK set to NULL because Task is gone)
+          - task_uuid  = <original UUID>   (forensic trail intact)
+          - to_status  = "PURGED"
+          - source     = "BEAT"
+        """
+        stale = self._make_completed_task("Stale For Tombstone", hours_ago=25)
+        stale_uuid = stale.pk  # Capture before deletion.
+
+        purge_old_completed_tasks()
+
+        # The Task row itself must be gone.
+        self.assertFalse(Task.objects.filter(pk=stale_uuid).exists())
+
+        # The tombstone AuditLog must exist and have the correct shape.
+        tombstone = AuditLog.objects.get(
+            task_uuid=stale_uuid, to_status="PURGED"
+        )
+        self.assertIsNone(tombstone.task)          # FK is NULL — task is gone.
+        self.assertEqual(tombstone.task_uuid, stale_uuid)  # UUID intact.
+        self.assertEqual(tombstone.from_status, "COMPLETED")
+        self.assertEqual(tombstone.source, AuditLog.Source.BEAT)
+
+    def test_pending_task_not_touched_by_purge(self):
+        """Purge must never delete a PENDING task regardless of age."""
+        old_pending = Task.objects.create(
+            owner=self.user,
+            title="Old Pending",
+            task_type=Task.TaskType.EMAIL,
+            status=Task.Status.PENDING,
+        )
+        # Back-date updated_at to look old (doesn't matter for purge filter,
+        # but makes the test intent explicit).
+        Task.objects.filter(pk=old_pending.pk).update(
+            completed_at=timezone.now() - timedelta(hours=48)
+        )
+        result = purge_old_completed_tasks()
+        self.assertEqual(result, 0)
+        self.assertTrue(Task.objects.filter(pk=old_pending.pk).exists())
+
